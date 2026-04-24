@@ -20,20 +20,6 @@ df_es = pd.read_csv("ult_freezer_database.csv")
 # =============================================================================
 ULT_REBATE_TABLE = {"< 20 cu. ft.": 600, "≥ 20 cu. ft.": 900}
 ULT_SALES_INCENTIVE = 50
-ULT_ELIGIBLE_BUILDING_TYPES = [
-    "Education – University (incl. Community Colleges)",
-    "Health/Medical – Hospital",
-    "Manufacturing – Biotech",
-    "Manufacturing – Pharmaceutical",
-    "Other Agricultural",
-    "Health/Medical – Clinics",
-    "Food Processing",
-    "Other Industrial",
-    "Metal Production and Fabrication",
-    "Health/Medical – Nursing Home",
-    "Retail – Single-Story Large",
-    "Warehouse – Refrigerated",
-]
 
 
 # =============================================================================
@@ -41,11 +27,9 @@ ULT_ELIGIBLE_BUILDING_TYPES = [
 # =============================================================================
 
 def _energy_col(temp_str: str) -> str:
-    """Return the correct CSV column for the chosen operating temperature."""
     return COL_70 if temp_str == "-70ºC" and COL_70 in df_es.columns else COL_80
 
 def _knn_recommend(vol: float, temp_str: str, k: int = 5):
-    """Return (best_model_name, neighbors_df) for the given volume & temp."""
     col = _energy_col(temp_str)
     tmp = df_es.copy()
     tmp["dist"] = (tmp["Total Volume (cu. ft.)"] - vol).abs()
@@ -54,21 +38,58 @@ def _knn_recommend(vol: float, temp_str: str, k: int = 5):
     return best_model, neighbors, col
 
 def _lookup_model(model_name: str, temp_str: str):
-    """Return the CSV row for a given model name."""
     row = df_es[df_es["Model Name"] == model_name]
     if row.empty:
         return None
     return row.iloc[0]
+
+
+# =============================================================================
+# KPI Cards Helper
+# =============================================================================
+
+def _make_kpi_cards(df):
+    n          = len(df)
+    total_kwh  = df["Existing: Pred. Energy (kWh/yr)"].sum()      if not df.empty else 0
+    total_sav  = df["Annual Energy Savings (kWh/yr)"].sum()        if not df.empty else 0
+    total_cost = df["Annual Cost Savings ($/yr)"].sum()            if not df.empty else 0
+
+    def card(title, value, sub, color, icon):
+        return ui.div(
+            ui.div(
+                ui.tags.span(icon, style="font-size:1.4rem; margin-bottom:4px; display:block;"),
+                ui.div(title, style=(
+                    "font-size:0.70rem; text-transform:uppercase; letter-spacing:0.06em; "
+                    "color:#6c757d; margin-bottom:6px; font-weight:600;"
+                )),
+                ui.div(value, style=(
+                    f"font-size:1.6rem; font-weight:700; color:{color}; line-height:1.1; margin-bottom:4px;"
+                )),
+                ui.div(sub, style="font-size:0.75rem; color:#adb5bd;"),
+                style=(
+                    "background:#fff; border:1px solid #dee2e6; border-radius:12px; "
+                    "padding:18px 20px; flex:1; min-width:160px; "
+                    "box-shadow:0 2px 6px rgba(0,0,0,0.06); text-align:center;"
+                )
+            ),
+        )
+
+    return ui.div(
+        card("Total Units",                              str(n),                      "in inventory",                        "#003262", "🧊"),
+        card("Total Energy Use",                         f"{int(total_kwh):,} kWh",   "predicted / year",                    "#e07b39", "⚡"),
+        card("Potential Annual kWh Savings",             f"{int(total_sav):,} kWh",   "if switch to Energy Star models",     "#4a9d6f", "📉"),
+        card("Potential Annual Cost Savings\nfrom Power Demand Reduction", f"${total_cost:,.2f}", "if switch to Energy Star models", "#5b8fcf", "💰"),
+        style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:24px;"
+    )
+
 
 # =============================================================================
 # Server Logic
 # =============================================================================
 
 def server(input, output, session):
-    inventory   = reactive.Value(pd.DataFrame())
+    inventory    = reactive.Value(pd.DataFrame())
     unit_counter = reactive.Value(0)
-
-    # ── Reactives ─────────────────────────────────────────────────────────────
 
     @reactive.Calc
     def _knn():
@@ -76,19 +97,17 @@ def server(input, output, session):
 
     @reactive.Calc
     def _existing_energy():
-        """Regression-predicted energy for the existing unit."""
         es_adj          = COEF_ES if input.is_es() else 0
         pred_daily      = CONST_BASE + es_adj + (COEF_VOL * input.vol()) + (COEF_AGE * input.age())
         pred_efficiency = pred_daily / input.vol() if input.vol() > 0 else 0
         return {
-            "daily_kwh":      round(pred_daily,      2),
-            "year_kwh":       round(pred_daily * 365, 0),
-            "efficiency":     round(pred_efficiency,  3),
+            "daily_kwh":  round(pred_daily,       2),
+            "year_kwh":   round(pred_daily * 365,  0),
+            "efficiency": round(pred_efficiency,   3),
         }
 
     @reactive.Calc
     def _desired_energy():
-        """Actual CSV energy for the selected desired model."""
         model = input.desired_model()
         if not model:
             return None
@@ -106,7 +125,14 @@ def server(input, output, session):
             "efficiency": round(daily / vol if vol > 0 else 0, 3),
         }
 
-    # ── Desired unit model selector (pre-populated with KNN pick) ─────────────
+    # ── KPI Summary ───────────────────────────────────────────────────────────
+
+    @output
+    @render.ui
+    def kpi_summary():
+        return _make_kpi_cards(inventory())
+
+    # ── Desired unit model selector ───────────────────────────────────────────
 
     @output
     @render.ui
@@ -114,7 +140,6 @@ def server(input, output, session):
         best_model, neighbors, col = _knn()
         all_models = df_es["Model Name"].tolist()
         choices    = {m: m for m in all_models}
-
         return ui.div(
             ui.p(
                 "KNN recommendation (closest volume, lowest energy):",
@@ -143,20 +168,20 @@ def server(input, output, session):
         return ui.div(
             ui.tags.table(
                 ui.tags.tr(
-                    ui.tags.td(ui.tags.strong("Volume"), style="padding:3px 8px; color:#555;"),
-                    ui.tags.td(f"{d['vol']} cu. ft.", style="padding:3px 8px;"),
+                    ui.tags.td(ui.tags.strong("Volume"),                        style="padding:3px 8px; color:#555;"),
+                    ui.tags.td(f"{d['vol']} cu. ft.",                           style="padding:3px 8px;"),
                 ),
                 ui.tags.tr(
                     ui.tags.td(ui.tags.strong(f"Energy ({temp_label}{fallback})"), style="padding:3px 8px; color:#555;"),
-                    ui.tags.td(f"{d['daily_kwh']} kWh/day", style="padding:3px 8px;"),
+                    ui.tags.td(f"{d['daily_kwh']} kWh/day",                    style="padding:3px 8px;"),
                 ),
                 ui.tags.tr(
-                    ui.tags.td(ui.tags.strong("Annual Energy"), style="padding:3px 8px; color:#555;"),
-                    ui.tags.td(f"{int(d['year_kwh']):,} kWh/yr", style="padding:3px 8px;"),
+                    ui.tags.td(ui.tags.strong("Annual Energy"),                 style="padding:3px 8px; color:#555;"),
+                    ui.tags.td(f"{int(d['year_kwh']):,} kWh/yr",               style="padding:3px 8px;"),
                 ),
                 ui.tags.tr(
-                    ui.tags.td(ui.tags.strong("Efficiency"), style="padding:3px 8px; color:#555;"),
-                    ui.tags.td(f"{d['efficiency']} kWh/cu ft/day", style="padding:3px 8px;"),
+                    ui.tags.td(ui.tags.strong("Efficiency"),                    style="padding:3px 8px; color:#555;"),
+                    ui.tags.td(f"{d['efficiency']} kWh/cu ft/day",              style="padding:3px 8px;"),
                 ),
                 style="font-size:0.82rem; width:100%;"
             ),
@@ -175,13 +200,12 @@ def server(input, output, session):
         desired  = _desired_energy()
 
         best_model, neighbors, col = _knn()
-        avg_es_year  = neighbors[col].mean() * 365
+        avg_es_year = neighbors[col].mean() * 365
 
-        # Annual savings: existing regression vs desired CSV
         if desired:
-            annual_kwh_savings  = max(0.0, existing["year_kwh"] - desired["year_kwh"])
+            annual_kwh_savings = max(0.0, existing["year_kwh"] - desired["year_kwh"])
         else:
-            annual_kwh_savings  = max(0.0, existing["year_kwh"] - avg_es_year)
+            annual_kwh_savings = max(0.0, existing["year_kwh"] - avg_es_year)
         annual_cost_savings = annual_kwh_savings * input.elec_rate()
 
         vol      = input.vol()
@@ -191,31 +215,28 @@ def server(input, output, session):
         new_count = unit_counter() + 1
         unit_counter.set(new_count)
 
-        desired_model_name = desired["model"]  if desired else best_model
-        desired_vol        = desired["vol"]    if desired else "—"
-        desired_daily      = desired["daily_kwh"] if desired else "—"
+        desired_model_name = desired["model"]     if desired else best_model
+        desired_vol        = desired["vol"]        if desired else "—"
+        desired_daily      = desired["daily_kwh"]  if desired else "—"
         desired_year       = int(desired["year_kwh"]) if desired else "—"
 
         new_row = pd.DataFrame({
-            "ID":                                     [f"Unit {new_count}"],
-            # ── Existing unit ──────────────────────────────────────────────────
-            "Existing: Capacity (cu. ft.)":           [vol],
-            "Existing: Age (Years)":                  [input.age()],
-            "Existing: Temp":                         [input.temp()],
-            "Existing: Energy Star?":                 ["Yes" if input.is_es() else "No"],
-            "Existing: Pred. Energy (kWh/day)":       [existing["daily_kwh"]],
-            "Existing: Pred. Energy (kWh/yr)":        [int(existing["year_kwh"])],
-            "Existing: Efficiency (kWh/cu ft/day)":   [existing["efficiency"]],
-            # ── Desired unit ──────────────────────────────────────────────────
-            "Desired: Model":                         [desired_model_name],
-            "Desired: Volume (cu. ft.)":              [desired_vol],
-            "Desired: Actual Energy (kWh/day)":       [desired_daily],
-            "Desired: Actual Energy (kWh/yr)":        [desired_year],
-            # ── Savings & rebate ──────────────────────────────────────────────
-            "Annual Energy Savings (kWh/yr)":         [round(annual_kwh_savings, 0)],
-            "Annual Cost Savings ($/yr)":             [round(annual_cost_savings, 2)],
-            "Size Category (2026)":                   [size_cat],
-            "Rebate Amount (2026)":                   [f"${rebate:,}"],
+            "ID":                                    [f"Unit {new_count}"],
+            "Existing: Capacity (cu. ft.)":          [vol],
+            "Existing: Age (Years)":                 [input.age()],
+            "Existing: Temp":                        [input.temp()],
+            "Existing: Energy Star?":                ["Yes" if input.is_es() else "No"],
+            "Existing: Pred. Energy (kWh/day)":      [existing["daily_kwh"]],
+            "Existing: Pred. Energy (kWh/yr)":       [int(existing["year_kwh"])],
+            "Existing: Efficiency (kWh/cu ft/day)":  [existing["efficiency"]],
+            "Desired: Model":                        [desired_model_name],
+            "Desired: Volume (cu. ft.)":             [desired_vol],
+            "Desired: Actual Energy (kWh/day)":      [desired_daily],
+            "Desired: Actual Energy (kWh/yr)":       [desired_year],
+            "Annual Energy Savings (kWh/yr)":        [round(annual_kwh_savings, 0)],
+            "Annual Cost Savings ($/yr)":            [round(annual_cost_savings, 2)],
+            "Size Category (2026)":                  [size_cat],
+            "Rebate Amount (2026)":                  [f"${rebate:,}"],
         })
 
         inventory.set(pd.concat([inventory(), new_row], ignore_index=True))
@@ -224,7 +245,6 @@ def server(input, output, session):
     @reactive.event(input.clear_btn)
     def _clear_inventory():
         inventory.set(pd.DataFrame())
-
 
     @output
     @render.table
@@ -237,7 +257,6 @@ def server(input, output, session):
     @output
     @render.ui
     def comparison_card():
-        """Live side-by-side comparison before adding to inventory."""
         existing = _existing_energy()
         desired  = _desired_energy()
         if desired is None:
@@ -259,7 +278,6 @@ def server(input, output, session):
         return ui.div(
             ui.h6("Live Comparison", style="margin:0 0 8px; color:#003262;"),
             ui.div(
-                # Existing column
                 ui.div(
                     ui.p(ui.tags.strong("Existing Unit"), style="margin:0 0 4px; font-size:0.85rem; text-align:center;"),
                     ui.tags.table(
@@ -270,7 +288,6 @@ def server(input, output, session):
                     ),
                     style="flex:1; background:#fff3cd; border-radius:6px; padding:8px;"
                 ),
-                # Desired column
                 ui.div(
                     ui.p(ui.tags.strong("Desired Unit"), style="margin:0 0 4px; font-size:0.85rem; text-align:center;"),
                     ui.tags.table(
@@ -351,33 +368,69 @@ def _specs_panel():
         )
     ] + [
         ui.tags.tr(
-            ui.tags.td(cat, style="padding:5px 10px; border-top:1px solid #dee2e6;"),
+            ui.tags.td(cat,        style="padding:5px 10px; border-top:1px solid #dee2e6;"),
             ui.tags.td(f"${amt:,}", style="padding:5px 10px; border-top:1px solid #dee2e6;"),
         )
         for cat, amt in ULT_REBATE_TABLE.items()
     ]
-    building_items = [ui.tags.li(b, style="margin-bottom:2px;") for b in ULT_ELIGIBLE_BUILDING_TYPES]
-    ice_rows = [
-        ui.tags.tr(
-            ui.tags.th("Tier",       style="padding:6px 10px; background:#dce8f5; text-align:left;"),
-            ui.tags.th("Incentive",  style="padding:6px 10px; background:#dce8f5; text-align:left;"),
-            ui.tags.th("Eligibility",style="padding:6px 10px; background:#dce8f5; text-align:left;"),
-        )
-    ] 
     return ui.div(
         ui.div(
-            ui.div(
-                ui.h5("ULT Freezers — 2026 Program Update", style="color:#003262; margin-top:0; font-size:0.95rem;"),
-                ui.p("Effective January 1, 2026. Certified to ", ui.tags.strong("ENERGY STAR Lab Grade Spec v2.0"), ".", style="font-size:0.82rem;"),
-                ui.h6("Rebate Amounts", style="margin-bottom:4px;"),
-                ui.tags.table(*ult_rebate_rows, style="border-collapse:collapse; font-size:0.84rem; margin-bottom:6px; width:100%;"),
-                ui.p(f"Sales incentive: ${ULT_SALES_INCENTIVE}/unit (unchanged).", style="font-size:0.8rem; color:#555; margin-bottom:8px;"),
-                ui.h6("Eligible Building Types (2026)", style="margin-bottom:4px;"),
-                ui.tags.ul(*building_items, style="font-size:0.8rem; margin:0 0 4px 0; padding-left:18px;"),
-            ),
-            style="display:flex; flex-wrap:wrap; gap:8px;"
+            ui.h5("ULT Freezers — 2026 Program Update", style="color:#003262; margin-top:0; font-size:0.95rem;"),
+            ui.p("Effective January 1, 2026. Certified to ", ui.tags.strong("ENERGY STAR Lab Grade Spec v2.0"), ".", style="font-size:0.82rem;"),
+            ui.h6("Rebate Amounts", style="margin-bottom:4px;"),
+            ui.tags.table(*ult_rebate_rows, style="border-collapse:collapse; font-size:0.84rem; margin-bottom:6px; width:100%;"),
+            ui.p(f"Sales incentive: ${ULT_SALES_INCENTIVE}/unit (unchanged).", style="font-size:0.8rem; color:#555; margin-bottom:8px;"),
         ),
         style="background:#f0f4f8; border:1px solid #c8d6e5; border-radius:8px; padding:16px; margin-bottom:20px;"
+    )
+
+
+# =============================================================================
+# UI Helper — Energy Star Search Panel
+# =============================================================================
+
+def _energystar_panel():
+    return ui.div(
+        ui.div(
+            ui.tags.span("🔍", style="font-size:1.1rem; margin-right:6px;"),
+            ui.tags.strong("Search the Energy Star Product Database"),
+            style="margin-bottom:8px; font-size:0.9rem; color:#003262;"
+        ),
+        ui.p(
+            "Browse and verify certified ULT freezer models directly from the Energy Star website. "
+            "Use the search below to look up make, model, and specifications.",
+            style="font-size:0.8rem; color:#555; margin-bottom:10px;"
+        ),
+        # Direct link button
+        ui.tags.a(
+            "🔗 Open Energy Star ULT Freezer Search (Full Page)",
+            href="https://www.energystar.gov/productfinder/product/certified-laboratory-grade-refrigerators-and-freezers/details",
+            target="_blank",
+            style=(
+                "display:inline-block; padding:7px 16px; background:#003262; color:#fff; "
+                "border-radius:6px; text-decoration:none; font-size:0.82rem; font-weight:600; "
+                "margin-bottom:12px;"
+            )
+        ),
+        # Embedded iframe — Energy Star product finder
+        ui.tags.iframe(
+            src=(
+                "https://www.energystar.gov/productfinder/product/"
+                "certified-laboratory-grade-refrigerators-and-freezers/details"
+            ),
+            width="100%",
+            height="600px",
+            style="border:1px solid #dee2e6; border-radius:8px;",
+            # Some sites block iframe embedding; the link above is the fallback
+        ),
+        ui.p(
+            "⚠ If the search tool doesn't load above, use the 'Open Full Page' link.",
+            style="font-size:0.75rem; color:#888; margin-top:6px;"
+        ),
+        style=(
+            "background:#fff; border:1px solid #dee2e6; border-radius:10px; "
+            "padding:16px; margin-bottom:20px;"
+        )
     )
 
 
@@ -394,6 +447,11 @@ app_ui = ui.page_fluid(
             table { font-size:0.85rem; }
             .btn-danger-outline { color:#dc3545; border-color:#dc3545; background:white; }
             .btn-danger-outline:hover { background:#dc3545; color:white; }
+            .section-title {
+                font-size:0.82rem; font-weight:700; color:#495057;
+                text-transform:uppercase; letter-spacing:0.06em;
+                margin-bottom:12px; border-bottom:2px solid #e9ecef; padding-bottom:5px;
+            }
         """)
     ),
     ui.div(
@@ -404,7 +462,6 @@ app_ui = ui.page_fluid(
     ui.layout_sidebar(
         ui.sidebar(
             ui.navset_tab(
-                # ── Tab 1: Existing Unit ─────────────────────────────────────
                 ui.nav_panel(
                     "Existing Unit",
                     ui.div(
@@ -420,7 +477,6 @@ app_ui = ui.page_fluid(
                         ),
                     )
                 ),
-                # ── Tab 2: Desired Unit ──────────────────────────────────────
                 ui.nav_panel(
                     "Desired Unit",
                     ui.div(
@@ -444,19 +500,49 @@ app_ui = ui.page_fluid(
             ui.output_ui("detail_card"),
             width=380
         ),
-        ui.div(
-            _specs_panel(),
-            ui.output_ui("comparison_card"),
-            ui.h4("Freezer Comparison Inventory"),
-            ui.output_table("inventory_table"),
-            ui.hr(),
-            ui.p(
-                "Existing unit energy is estimated via linear regression (age, capacity, Energy Star status). "
-                "Desired unit energy is the actual measured value from the Energy Star database. "
-                "Savings = existing predicted annual kWh minus desired actual annual kWh. "
-                "Rebates reflect 2026 CPUC size categories.",
-                style="font-size:0.82rem; color:#555;"
-            )
+
+        # ── Main Panel ────────────────────────────────────────────────────────
+        ui.navset_tab(
+
+            # Tab 1: Calculator
+            ui.nav_panel(
+                "📊 Calculator",
+                ui.div(
+                    _specs_panel(),
+
+                    # KPI Summary
+                    ui.div("Inventory Summary", class_="section-title"),
+                    ui.output_ui("kpi_summary"),
+
+                    # Live comparison
+                    ui.div("Live Comparison", class_="section-title"),
+                    ui.output_ui("comparison_card"),
+
+                    # Inventory table
+                    ui.div("Freezer Comparison Inventory", class_="section-title"),
+                    ui.output_table("inventory_table"),
+                    ui.hr(),
+                    ui.p(
+                        "Existing unit energy is estimated via linear regression (age, capacity, Energy Star status). "
+                        "Desired unit energy is the actual measured value from the Energy Star database. "
+                        "Savings = existing predicted annual kWh minus desired actual annual kWh. "
+                        "Rebates reflect 2026 CPUC size categories.",
+                        style="font-size:0.82rem; color:#555;"
+                    ),
+                    style="padding-top:16px;"
+                )
+            ),
+
+            # Tab 2: Energy Star Search
+            ui.nav_panel(
+                "🔍 Energy Star Model Search",
+                ui.div(
+                    _energystar_panel(),
+                    style="padding-top:16px;"
+                )
+            ),
+
+            id="main_tabs"
         )
     )
 )
